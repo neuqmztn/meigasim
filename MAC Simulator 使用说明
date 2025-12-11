@@ -1,0 +1,212 @@
+📘 MAC Simulator 使用说明（README.md）
+1. 功能描述（Function Overview）
+
+mac_simulator.py 是一个专门用于 Transformer 加速器项目的
+结构级（Structural-Level） + 周期级（Cycle-Level） 估计器。
+
+它基于 Synopsys Design Compiler（DC）对 coordinated_skip_mac_unit 综合后的
+真实工艺特性（面积 / 动态功耗 / 漏电 / 时钟延迟），
+用于在系统层面评估：
+
+✔ 单颗 MAC 的性能与功耗
+
+面积（Area）
+
+动态能量（Dynamic Energy）
+
+漏电能量（Leakage Energy）
+
+平均动态 / 总功耗
+
+✔ Skip-Gating 稀疏行为的能耗影响
+
+指定稀疏度（active_ratio）可自动缩放能量
+
+指定翻转率（pp_activity_scale）模拟低密度输入
+
+✔ Pipeline 级别的时序与调度
+
+输出总周期数（Total Cycles）
+
+流水线延迟（Pipeline Latency）
+
+每拍 pipeline 状态（trace_pipeline_schedule）
+
+✔ 子模块能耗比例（Booth / PP Generator / Sum Tree / Skip Detector）
+
+用于后续论文绘图、模块级 profiling。
+
+2. 使用方法（How to Use）
+2.1 引入模块
+
+将 mac_simulator.py 放在你的工程根目录或 Python 搜索路径中：
+
+from mac_simulator import (
+    CoordinatedSkipMacSimulator,
+    MacActivityConfig,
+)
+
+2.2 创建 MAC 仿真器实例
+mac = CoordinatedSkipMacSimulator()
+
+
+默认会加载基于 DC（tcbn45gsbwp12ttc_ccs）的技术参数：
+
+面积：2979.51
+
+动态功耗：60.58 µW
+
+漏电功耗：47.87 µW
+
+时钟：500 MHz（周期 2ns）
+
+2.3 执行一次 MAC 能量仿真
+num_ops = 1000   # 例如 QK^T 中有 1000 次 MAC 运算
+
+activity = MacActivityConfig(
+    mac_active_ratio=0.4,    # 40% 的周期中有计算（稀疏/skip）
+    pp_activity_scale=0.6    # 活跃周期内，翻转率为 60%
+)
+
+result = mac.simulate(num_ops, activity)
+
+2.4 查看仿真结果
+print("总周期:", result.total_cycles)
+print("流水线延迟:", result.latency_cycles)
+print("面积:", result.area_total)
+
+print("动态能量 (pJ):", result.energy_dyn_total * 1e12)
+print("漏电能量 (pJ):", result.energy_leak_total * 1e12)
+
+print("平均动态功耗 (uW):", result.avg_power_dyn * 1e6)
+print("平均总功耗 (uW):", result.avg_power_total * 1e6)
+
+print("子模块能量分解:", result.energy_dyn_breakdown)
+
+2.5 查看流水线行为（可选）
+trace = mac.trace_pipeline_schedule(num_ops=8)
+for row in trace:
+    print(row)
+
+
+输出示例：
+
+{'cycle': 0, 'stage0_valid': True,  'stage1_valid': False, 'stage2_valid': False}
+{'cycle': 1, 'stage0_valid': True,  'stage1_valid': True,  'stage2_valid': False}
+{'cycle': 2, 'stage0_valid': True,  'stage1_valid': True,  'stage2_valid': True}
+...
+
+
+可用于绘制 pipeline 可视化图或分析 CE stall 情况。
+
+3. 参数配置（Parameter Configuration）
+
+MAC Simulator 的配置分为三类：
+
+3.1 技术参数（MacTechParams）
+
+该类储存来自 DC 的工艺结果：
+
+MacTechParams(
+    area_total=2979.51,     # 单颗 MAC 的面积
+    p_dyn_total=60.58e-6,   # DC 的动态功耗
+    p_leak_total=47.87e-6,  # DC 的漏电功耗
+    clk_period=2e-9         # 2ns clock → 500MHz
+)
+
+
+可通过以下方式覆盖默认值：
+
+mac = CoordinatedSkipMacSimulator(
+    tech=MacTechParams(area_total=3200)
+)
+
+3.2 子模块功耗比例（MacBreakdown）
+
+根据 report_power -hier 自动拆解成模块占比：
+
+模块	默认占比
+Sum Tree	42%
+PP Generator	18%
+Skip Detector	2%
+Booth Encoder	2%
+Other Logic	36%
+
+可手动调整：
+
+breakdown = MacBreakdown(
+    frac_sum_tree=0.45,
+    frac_pp_generator=0.20,
+    frac_skip_detector=0.02,
+    frac_booth_encoder=0.02,
+    frac_other_logic=0.31
+)
+
+3.3 活跃度稀疏配置（MacActivityConfig）
+
+用于模拟真实 workload 下 power scaling：
+
+MacActivityConfig(
+    mac_active_ratio=0.4,      # 有效的时钟周期比例
+    pp_activity_scale=0.6      # 活跃周期内翻转率
+)
+
+
+它的作用：
+
+模拟 skip gating（活跃率下降 → 动态能量下降）
+
+模拟稀疏激活（翻转率下降 → 动态能量下降）
+
+适用于 Transformer 的 FlashAttention / BFP 稀疏行为
+
+4. 输出内容说明（Result Fields）
+
+仿真器返回 MacSimResult 对象，其中包含：
+
+字段	意义
+num_ops	执行的 MAC 数量
+total_cycles	总周期数（自动加 pipeline latency）
+latency_cycles	MAC pipeline 的深度
+area_total	面积（来自 DC）
+energy_dyn_total	动态能量（与 workload 相关）
+energy_leak_total	漏电能量（与周期数相关）
+energy_dyn_breakdown	按子模块分解的动态能量
+avg_power_dyn	平均动态功耗
+avg_power_total	总功耗（动态 + 漏电）
+5. 示例输出（真实运行结果）
+==== MAC 仿真结果 ====
+输入 MAC 次数: 1000
+总拍数: 1002
+流水线延迟(拍): 3
+面积(约): 2979.51
+总动态能量 (pJ): 29.151
+总漏电能量 (pJ): 95.935
+平均动态功耗 (uW): 14.546
+平均总功耗   (uW): 62.418
+动态能量按子模块分解 (pJ):
+   sum_tree:       12.244
+   pp_generator:    5.247
+   skip_detector:   0.583
+   booth_encoder:   0.583
+   other_logic:    10.495
+
+6. 适用范围（Use Cases）
+
+该模拟器可直接用于：
+
+CE（Compute Engine）系统建模
+
+PU（Processing Unit）资源规划
+
+FlashAttention chunk 大小与带宽折中
+
+FFN 分块调度分析
+
+BFP Transformer 的稀疏性能耗分析
+
+DFA Training 的反向路径能耗
+
+学术论文性能/功耗评估部分
+
+支持多颗 MAC 并行，只需在上层循环调用即可。
